@@ -156,6 +156,7 @@ export abstract class SbmSocket extends EventEmitter {
       const replyChannel = `${request.channel}_reply_${request.messageId}`;
       const unregister = this.onHandler(replyChannel, async (message: Message) => {
         if (message.replyTo === request.messageId) {
+          clearTimeout(timer); // Clear the timer on success
           resolve(message);
           unregister();
         }
@@ -164,12 +165,13 @@ export abstract class SbmSocket extends EventEmitter {
 
       this.sendAsync(request).catch(reject);
 
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         unregister();
         reject(new Error("Request timed out."));
       }, timeout);
     });
   }
+
 
   public broadcastEvent(event: string, data?: any): void {
     const handlers = this._eventHandlers.get(event);

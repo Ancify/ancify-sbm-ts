@@ -13,6 +13,10 @@ transport.alwaysReconnect = true
 const client = new ClientSocket(transport);
 
 (async() => {
+    client.on('connectionStatusChanged', args => {
+        console.log(args)
+    })
+
     await client.connectAsync()
     await client.authenticateAsync("t", "h")
 
@@ -20,8 +24,12 @@ const client = new ClientSocket(transport);
         console.log(`message_received: ${message}`)
     })
 
-    const reply = await client.sendRequestAsync(new Message('test', 'request!'));
-    console.log(`reply: ${reply.data}`)
+    try {
+        const reply = await client.sendRequestAsync(new Message('test', 'request!'));
+        console.log(`reply: ${reply.data}`)
+    } catch (err) {
+        console.log('failed to get reply', err);
+    }
 })()
 
 console.log('done?')

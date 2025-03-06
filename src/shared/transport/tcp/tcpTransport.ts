@@ -140,6 +140,9 @@ export class TcpTransport extends EventEmitter implements Transport {
         }
 
         this.isConnected = true
+
+        await delay(1) // race conditions!
+
         this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(isReconnect ? ConnectionStatus.Reconnected : ConnectionStatus.Connected));
         return;
       } catch (err) {
@@ -197,7 +200,7 @@ export class TcpTransport extends EventEmitter implements Transport {
     while (!this.disposed) {
       try {
         if (!this.isConnected || !this.socket.readable) {
-          await delay(100);
+          await delay(1);
           continue;
         }
 
