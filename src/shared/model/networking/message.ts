@@ -23,7 +23,6 @@ export class Message {
   }
 
   public senderIsServer(): boolean {
-    // We assume the server uses an empty or “zero” GUID
     return this.senderId === "" || this.senderId === "00000000-0000-0000-0000-000000000000";
   }
 
@@ -31,7 +30,14 @@ export class Message {
     const reply = new Message(`${source.channel}_reply_${source.messageId}`, data);
     reply.replyTo = source.messageId;
     reply.targetId = source.senderId;
-    // senderId will be set by the sending socket
     return reply;
+  }
+
+  public static fromObject(obj: any): Message {
+    return new Message(
+      obj.channel,
+      obj.data,
+      obj.targetId
+    );
   }
 }

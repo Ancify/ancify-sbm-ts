@@ -3,12 +3,18 @@ import { ConnectionStatusEventArgs } from "../shared/model/networking/connection
 import { EventEmitter } from "events";
 
 /**
- * The Transport interface abstracts a TCP/TLS transport.
+ * The Transport interface abstracts different transport layers such as TCP and WebSockets.
  */
 export interface Transport extends EventEmitter {
-  connectAsync(maxRetries?: number, delayMilliseconds?: number): Promise<void>;
+  alwaysReconnect: boolean;
+  maxConnectWaitTime: number;
+
+  connectAsync(maxRetries?: number, delayMilliseconds?: number, isReconnect?: boolean): Promise<void>;
   sendAsync(message: Message): Promise<void>;
+  reconnect(): Promise<void>;
   receiveAsync(abortSignal?: AbortSignal): AsyncIterable<Message>;
   onAuthenticated(): void;
+  close(): void;
+
   // Transport implementations should emit a "connectionStatusChanged" event with a ConnectionStatusEventArgs instance.
 }

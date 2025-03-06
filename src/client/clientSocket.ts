@@ -5,33 +5,32 @@ import { ConnectionStatus, ConnectionStatusEventArgs } from "../shared/model/net
 
 export class ClientSocket extends SbmSocket {
   constructor(transport: Transport) {
-    super();
-    this._transport = transport;
-    // Forward transport connection events to SbmSocket
-    transport.on("connectionStatusChanged", (e: ConnectionStatusEventArgs) => {
-      this.onConnectionStatusChanged(e);
-    });
+    super(transport);
     this.startReceiving();
+    this.setupHandlers();
+  }
+
+  private setupHandlers(): void {
+    this.on("__$status", (message: Message) => Message.fromReply(message, { Success: true }));
   }
 
   public async connectAsync(): Promise<void> {
-    this.onConnectionStatusChanged(new ConnectionStatusEventArgs(ConnectionStatus.Connecting));
     await this._transport!.connectAsync();
-    this.onConnectionStatusChanged(new ConnectionStatusEventArgs(ConnectionStatus.Connected));
   }
 
-  public async authenticateAsync(id: string, key: string): Promise<boolean> {
-    const message = new Message("_auth_", { Id: id, Key: key });
+  public async authenticateAsync(id: string, key: string, scope?: string): Promise<boolean> {
+    const message = new Message("_auth_", { Id: id, Key: key, Scope: scope });
     const response = await this.sendRequestAsync(message);
     const data = response.asTypeless();
     const success = Boolean(data["Success"]);
+
     if (success) {
       this._transport?.onAuthenticated();
     }
+
     return success;
   }
 
-  // Override to ensure the senderId is set
   public override async sendAsync(message: Message): Promise<void> {
     message.senderId = this.clientId;
     await super.sendAsync(message);

@@ -7,36 +7,17 @@ import {
   ConnectionStatusEventArgs,
 } from "../../../shared/model/networking/connectionStatus";
 import { EventEmitter } from "events";
-import { createCodec, decode, encode } from "msgpack-lite";
+import { decode, encode } from "msgpack-lite";
 
 export interface SslConfig {
   sslEnabled: boolean;
   rejectUnauthorized: boolean;
-  // For server-side TLS: provide key and certificate
   key?: string | Buffer;
   cert?: string | Buffer;
 }
 
-interface IMessage {
-  channel: string;
-  data?: any;
-  replyTo?: string;
-  messageId: string;
-  senderId: string;
-  targetId?: string;
-}
-
-function serializeMessage(message: IMessage): Buffer {
-  message.senderId = '00000000-0000-0000-0000-000000000000'
-  const arr = [
-    message.channel,
-    message.data,
-    message.replyTo,
-    message.messageId,
-    message.senderId,
-    message.targetId,
-  ];
-  return encode(arr);
+function delay(ms: number) {
+  return new Promise( resolve => setTimeout(resolve, ms) );
 }
 
 export class TcpTransport extends EventEmitter implements Transport {
@@ -46,29 +27,28 @@ export class TcpTransport extends EventEmitter implements Transport {
   private sslConfig: SslConfig;
   private isServer: boolean = false;
   private isSettingUpSsl: boolean = false;
-  private writeLock: Promise<void> = Promise.resolve();
-  private buffer: Buffer = Buffer.alloc(0);
   private disposed: boolean = false;
+  private buffer: Buffer = Buffer.alloc(0);
+  private writeLock: Promise<void> = Promise.resolve();
   private _releaseLock: () => void = () => {};
+  private isConnected: boolean = false;
 
-  /**
-   * Use this constructor when you already have a connected socket (server-side).
-   */
+  public alwaysReconnect: boolean = false;
+  public maxConnectWaitTime: number = 60000; // Default: 60 seconds
+
   constructor(
     socketOrHost: Socket | string,
     portOrSslConfig: number | SslConfig,
-    sslConfigArg?: SslConfig,
+    sslConfigArg?: SslConfig
   ) {
     super();
     if (typeof socketOrHost === "string") {
-      // Client constructor: host and port provided.
       this.host = socketOrHost;
       this.port = portOrSslConfig as number;
       this.sslConfig = sslConfigArg!;
-      this.isServer = false;
       this.socket = new Socket();
+      this.isServer = false;
     } else {
-      // Server constructor: socket is already provided.
       this.socket = socketOrHost;
       this.host = socketOrHost.remoteAddress || "";
       this.port = socketOrHost.remotePort || 0;
@@ -77,110 +57,116 @@ export class TcpTransport extends EventEmitter implements Transport {
     }
   }
 
-  /**
-   * For a server-side transport, if SSL is enabled, wrap the existing socket.
-   */
+  private handleSocketErrors(): void {
+    this.socket.on("error", (err) => {
+      console.error("Socket error:", err);
+      this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
+      if (this.alwaysReconnect) this.reconnect();
+    });
+
+    this.socket.on("close", () => {
+      console.warn("Socket closed.");
+      this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
+      if (this.alwaysReconnect) this.reconnect();
+    });
+
+    this.socket.on("end", () => {
+      console.warn("Socket ended.");
+      this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
+      if (this.alwaysReconnect) this.reconnect();
+    });
+  }
+
   public async setupServerStream(): Promise<void> {
     if (this.sslConfig.sslEnabled) {
       this.isSettingUpSsl = true;
       if (!this.sslConfig.cert || !this.sslConfig.key) {
-        throw new Error(
-          "SSL is enabled but no certificate/key provided for server authentication.",
-        );
+        throw new Error("SSL enabled but no certificate/key provided.");
       }
-      const options: tls.TlsOptions = {
-        cert: this.sslConfig.cert,
-        key: this.sslConfig.key,
-        rejectUnauthorized: this.sslConfig.rejectUnauthorized,
-      };
-      // Wrap the underlying socket in a TLSSocket
+
       this.socket = new tls.TLSSocket(this.socket, {
         isServer: true,
-        ...options,
+        key: this.sslConfig.key,
+        cert: this.sslConfig.cert,
+        rejectUnauthorized: this.sslConfig.rejectUnauthorized,
       });
+
       await new Promise<void>((resolve, reject) => {
         (this.socket as tls.TLSSocket).once("secureConnect", resolve);
         (this.socket as tls.TLSSocket).once("error", reject);
       });
+
       this.isSettingUpSsl = false;
     }
-    this.emit(
-      "connectionStatusChanged",
-      new ConnectionStatusEventArgs(ConnectionStatus.Connected),
-    );
+
+    this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Connected));
   }
 
   public async connectAsync(
     maxRetries: number = 5,
     delayMilliseconds: number = 1000,
+    isReconnect: boolean = false
   ): Promise<void> {
-    this.emit(
-      "connectionStatusChanged",
-      new ConnectionStatusEventArgs(ConnectionStatus.Connecting),
-    );
-    let attempt = 0;
-    while (attempt < maxRetries) {
+    this.isConnected = false;
+    if (isReconnect) {
+      this.socket.destroy();
+      this.socket = new Socket();
+      //this.handleSocketErrors();
+    }
+
+    this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(isReconnect ? ConnectionStatus.Reconnecting : ConnectionStatus.Connecting));
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         await new Promise<void>((resolve, reject) => {
           this.socket.connect(this.port, this.host, resolve);
           this.socket.once("error", reject);
         });
+
         if (this.sslConfig.sslEnabled) {
-          this.isSettingUpSsl = true;
-          const options: tls.ConnectionOptions = {
-            host: this.host,
-            port: this.port,
-            rejectUnauthorized: this.sslConfig.rejectUnauthorized,
-          };
-          this.socket = tls.connect(options, () => {
-            this.isSettingUpSsl = false;
-          });
+          this.socket = tls.connect(
+            {
+              host: this.host,
+              port: this.port,
+              rejectUnauthorized: this.sslConfig.rejectUnauthorized,
+            },
+            () => (this.isSettingUpSsl = false)
+          );
+
           await new Promise<void>((resolve, reject) => {
-            (this.socket as tls.TLSSocket).once(
-              "secureConnect",
-              resolve,
-            );
+            (this.socket as tls.TLSSocket).once("secureConnect", resolve);
             (this.socket as tls.TLSSocket).once("error", reject);
           });
         }
-        this.emit(
-          "connectionStatusChanged",
-          new ConnectionStatusEventArgs(ConnectionStatus.Connected),
-        );
+
+        this.isConnected = true
+        this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(isReconnect ? ConnectionStatus.Reconnected : ConnectionStatus.Connected));
         return;
       } catch (err) {
-        attempt++;
-        console.error(`Attempt ${attempt} failed:`, err);
-        if (attempt >= maxRetries) {
-          this.emit(
-            "connectionStatusChanged",
-            new ConnectionStatusEventArgs(ConnectionStatus.Failed),
-          );
-          throw new Error(
-            `Failed to connect to ${this.host}:${this.port} after ${maxRetries} attempts.`,
-          );
+        console.error(`Attempt ${attempt + 1} failed:`, err);
+        if (attempt + 1 >= maxRetries) {
+          this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Failed));
+          return;
         }
-        await new Promise((res) =>
-          setTimeout(
-            res,
-            delayMilliseconds * Math.pow(2, attempt - 1),
-          )
-        );
+        await new Promise((res) => setTimeout(res, Math.min(delayMilliseconds * Math.pow(2, attempt), this.maxConnectWaitTime)));
       }
     }
   }
 
-  public onAuthenticated(): void {
-    this.emit(
-      "connectionStatusChanged",
-      new ConnectionStatusEventArgs(ConnectionStatus.Authenticated),
-    );
-  }
-
   public async sendAsync(message: Message): Promise<void> {
-    const data = serializeMessage(message);
+    message.senderId = '00000000-0000-0000-0000-000000000000'
+    const data = encode([
+      message.channel,
+      message.data,
+      message.replyTo,
+      message.messageId,
+      message.senderId,
+      message.targetId,
+    ]);
+
     const lengthBuffer = Buffer.alloc(4);
     lengthBuffer.writeUInt32LE(data.length, 0);
+
     await this.acquireLock();
     try {
       await this.writeAll(lengthBuffer);
@@ -190,12 +176,9 @@ export class TcpTransport extends EventEmitter implements Transport {
     }
   }
 
-  private writeAll(buffer: Buffer): Promise<void> {
+  private async writeAll(buffer: Buffer): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.socket.write(buffer, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
+      this.socket.write(buffer, (err) => (err ? reject(err) : resolve()));
     });
   }
 
@@ -206,97 +189,94 @@ export class TcpTransport extends EventEmitter implements Transport {
     });
   }
 
-  private releaseLock() {
+  private releaseLock(): void {
     this._releaseLock();
   }
 
-  public async *receiveAsync(
-    abortSignal?: AbortSignal,
-  ): AsyncIterable<Message> {
+  public async *receiveAsync(): AsyncIterable<Message> {
     while (!this.disposed) {
       try {
-        const lengthPrefix = await this.readExact(4, abortSignal);
-        if (!lengthPrefix) break;
-        const length = lengthPrefix.readUInt32LE(0);
-        const dataBuffer = await this.readExact(length, abortSignal);
-        if (!dataBuffer) break;
-        const decoded = decode(dataBuffer);
+        if (!this.isConnected || !this.socket.readable) {
+          await delay(100);
+          continue;
+        }
 
+        const lengthPrefix = await this.readExact(4);
+        if (!lengthPrefix) {
+          if (this.alwaysReconnect) await this.reconnect();
+          continue;
+        }
+
+        const length = lengthPrefix.readUInt32LE(0);
+        const dataBuffer = await this.readExact(length);
+        if (!dataBuffer) {
+          if (this.alwaysReconnect) await this.reconnect();
+          continue;
+        }
+
+        const decoded = decode(dataBuffer);
         if (!Array.isArray(decoded) || decoded.length < 6) {
           throw new Error("Invalid message format received.");
         }
 
-        // Convert array to Message object
-        const message: Message = new Message(decoded[0], decoded[1], decoded[5]); // channel, data, targetId
-        message.replyTo = decoded[2]; // replyTo
-        message.messageId = decoded[3]; // messageId
-        message.senderId = decoded[4]; // senderId
+        const message = new Message(decoded[0], decoded[1], decoded[5]); // channel, data, targetId
+        message.replyTo = decoded[2];
+        message.messageId = decoded[3];
+        message.senderId = decoded[4];
         yield message;
       } catch (err) {
         console.error("Error reading from socket:", err);
-        break;
+        if (this.alwaysReconnect) await this.reconnect();
       }
     }
   }
 
-  /**
-   * Reads exactly n bytes from the socket, accumulating data as needed.
-   */
-  private async readExact(n: number, abortSignal?: AbortSignal): Promise<Buffer | null> {
+  private async readExact(n: number): Promise<Buffer | null> {
     let bytesRead = 0;
     const chunks: Buffer[] = [];
-  
+
     while (bytesRead < n) {
       if (this.buffer.length >= n - bytesRead) {
-        // Extract the required portion from the buffer
         chunks.push(this.buffer.subarray(0, n - bytesRead));
         this.buffer = this.buffer.subarray(n - bytesRead);
         return Buffer.concat(chunks);
       }
-  
-      // If we don't have enough data, wait for more
+
       try {
         const chunk = await new Promise<Buffer>((resolve, reject) => {
-          const onData = (data: Buffer) => {
-            this.socket.off("error", onError);
-            resolve(data);
-          };
-  
-          const onError = (err: Error) => {
-            this.socket.off("data", onData);
-            reject(err);
-          };
-  
-          this.socket.once("data", onData);
-          this.socket.once("error", onError);
-  
-          if (abortSignal) {
-            abortSignal.addEventListener("abort", () => {
-              this.socket.off("data", onData);
-              this.socket.off("error", onError);
-              reject(new Error("Read operation aborted."));
-            });
-          }
+          this.socket.once("data", resolve);
+          this.socket.once("error", reject);
         });
-  
+
         this.buffer = Buffer.concat([this.buffer, chunk]);
       } catch (err) {
-        console.error("Error while reading from socket:", err);
+        console.error("Error reading from socket:", err);
         return null;
       }
     }
-  
-    return null; // Should never reach this point
+
+    return null;
   }
-  
+
+  public onAuthenticated(): void {
+    this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Authenticated));
+  }
+
+  public async reconnect(): Promise<void> {
+    console.log('attempting to reconnect')
+    if (this.alwaysReconnect) {
+      await this.connectAsync(Number.MAX_SAFE_INTEGER, 100, true);
+    }
+  }
 
   public dispose(): void {
     this.disposed = true;
     this.socket.end();
     this.socket.destroy();
-    this.emit(
-      "connectionStatusChanged",
-      new ConnectionStatusEventArgs(ConnectionStatus.Disconnected),
-    );
+    this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
+  }
+
+  public close(): void {
+    this.dispose();
   }
 }

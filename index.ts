@@ -9,6 +9,7 @@ const sslConfig: SslConfig = {
 }
 
 const transport = new TcpTransport("127.0.0.1", 12345, sslConfig);
+transport.alwaysReconnect = true
 const client = new ClientSocket(transport);
 
 (async() => {
