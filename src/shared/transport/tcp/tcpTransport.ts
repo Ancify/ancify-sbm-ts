@@ -237,29 +237,47 @@ export class TcpTransport extends EventEmitter implements Transport {
   private async readExact(n: number): Promise<Buffer | null> {
     let bytesRead = 0;
     const chunks: Buffer[] = [];
-
+  
     while (bytesRead < n) {
+      // If we already have enough data in our buffer:
       if (this.buffer.length >= n - bytesRead) {
-        chunks.push(this.buffer.subarray(0, n - bytesRead));
-        this.buffer = this.buffer.subarray(n - bytesRead);
+        const needed = n - bytesRead;
+        chunks.push(this.buffer.subarray(0, needed));
+        this.buffer = this.buffer.subarray(needed);
+        bytesRead += needed;
         return Buffer.concat(chunks);
       }
-
+  
+      // Otherwise, wait for new data to arrive:
       try {
         const chunk = await new Promise<Buffer>((resolve, reject) => {
-          this.socket.once("data", resolve);
-          this.socket.once("error", reject);
+          const onData = (data: Buffer) => {
+            // We got data; remove the error listener and resolve
+            this.socket.removeListener("error", onError);
+            resolve(data);
+          };
+          const onError = (err: Error) => {
+            // We got an error; remove the data listener and reject
+            this.socket.removeListener("data", onData);
+            reject(err);
+          };
+  
+          this.socket.once("data", onData);
+          this.socket.once("error", onError);
         });
-
+  
+        // We successfully got data; append it to our buffer
         this.buffer = Buffer.concat([this.buffer, chunk]);
       } catch (err) {
         console.error("Error reading from socket:", err);
         return null;
       }
     }
-
+  
+    // If we exit the while loop, we never got enough bytes
     return null;
   }
+  
 
   public onAuthenticated(): void {
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Authenticated));
