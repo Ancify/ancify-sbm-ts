@@ -11,7 +11,7 @@ export class ClientSocket extends SbmSocket {
   }
 
   private setupHandlers(): void {
-    this.on("__$status", (message: Message) => Message.fromReply(message, { Success: true }));
+    this.onHandler("__$status", async (message: Message) => Message.fromReply(message, { Success: true }));
   }
 
   public async connectAsync(): Promise<void> {

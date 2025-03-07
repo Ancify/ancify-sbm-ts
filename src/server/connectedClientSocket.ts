@@ -21,7 +21,7 @@ export class ConnectedClientSocket extends SbmSocket {
   }
 
   private setupAuthHandlers(): void {
-    this.on("_auth_", async (message: Message) => {
+    this.onHandler("_auth_", async (message: Message) => {
       this.authStatus = AuthStatus.Authenticating;
 
       const data = message.asTypeless();
