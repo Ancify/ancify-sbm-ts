@@ -157,25 +157,29 @@ export class TcpTransport extends EventEmitter implements Transport {
   }
 
   public async sendAsync(message: Message): Promise<void> {
-    message.senderId = '00000000-0000-0000-0000-000000000000'
-    const data = encode([
-      message.channel,
-      message.data,
-      message.replyTo,
-      message.messageId,
-      message.senderId,
-      message.targetId,
-    ]);
-
-    const lengthBuffer = Buffer.alloc(4);
-    lengthBuffer.writeUInt32LE(data.length, 0);
-
-    await this.acquireLock();
     try {
-      await this.writeAll(lengthBuffer);
-      await this.writeAll(data);
-    } finally {
-      this.releaseLock();
+      message.senderId = '00000000-0000-0000-0000-000000000000'
+      const data = encode([
+        message.channel,
+        message.data,
+        message.replyTo,
+        message.messageId,
+        message.senderId,
+        message.targetId,
+      ]);
+
+      const lengthBuffer = Buffer.alloc(4);
+      lengthBuffer.writeUInt32LE(data.length, 0);
+
+      await this.acquireLock();
+      try {
+        await this.writeAll(lengthBuffer);
+        await this.writeAll(data);
+      } finally {
+        this.releaseLock();
+      }
+    } catch (ex) {
+      console.log(ex)
     }
   }
 
