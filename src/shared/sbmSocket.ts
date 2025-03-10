@@ -141,7 +141,7 @@ export abstract class SbmSocket extends EventEmitter {
 
   public sendAsync(message: Message): Promise<void> {
     if (!this._transport) {
-      throw new Error("Transport is not initialized.");
+      return Promise.resolve();
     }
     message.senderId = this.clientId;
     return this._transport.sendAsync(message);
