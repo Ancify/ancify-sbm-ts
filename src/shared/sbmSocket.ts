@@ -17,7 +17,7 @@ export enum AuthStatus {
  */
 export abstract class SbmSocket extends EventEmitter {
   protected _transport?: Transport;
-  protected _handlers: Map<string, Array<(message: Message) => Promise<Message | undefined | null>>> = new Map();
+  protected _handlers: Map<string, Array<(message: Message) => Promise<Message | void | null>>> = new Map();
   protected _eventHandlers: Map<string, Array<(data: any) => Promise<void>>> = new Map();
   protected abortController: AbortController = new AbortController();
   public authStatus: AuthStatus = AuthStatus.None;
@@ -94,7 +94,7 @@ export abstract class SbmSocket extends EventEmitter {
    * Registers an asynchronous handler that may return a response message.
    * Returns a function that, when called, unregisters the handler.
    */
-  public onHandler(channel: string, handler: (message: Message) => Promise<Message | undefined | null>): () => void {
+  public onHandler(channel: string, handler: (message: Message) => Promise<Message | void | null>): () => void {
     if (!this._handlers.has(channel)) {
       this._handlers.set(channel, []);
     }
