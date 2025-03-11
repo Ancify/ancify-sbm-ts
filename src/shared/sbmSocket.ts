@@ -167,7 +167,7 @@ export abstract class SbmSocket extends EventEmitter {
 
       const timer = setTimeout(() => {
         unregister();
-        reject(new Error("Request timed out."));
+        reject(new Error(`Request ${request.channel} timed out.`));
       }, timeout);
     });
   }
