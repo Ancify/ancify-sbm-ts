@@ -20,6 +20,16 @@ function delay(ms: number) {
   return new Promise( resolve => setTimeout(resolve, ms) );
 }
 
+export class Mutex {
+  private mutex = Promise.resolve();
+
+  lock(): Promise<() => void> {
+      return new Promise((resolve) => {
+          this.mutex = this.mutex.then(() => new Promise(resolve));
+      });
+  }
+}
+
 export class TcpTransport extends EventEmitter implements Transport {
   private socket: Socket | tls.TLSSocket;
   private host: string;
@@ -29,8 +39,7 @@ export class TcpTransport extends EventEmitter implements Transport {
   private isSettingUpSsl: boolean = false;
   private disposed: boolean = false;
   private buffer: Buffer = Buffer.alloc(0);
-  private writeLock: Promise<void> = Promise.resolve();
-  private _releaseLock: () => void = () => {};
+  private mutex: Mutex = new Mutex();
   private isConnected: boolean = false;
 
   public alwaysReconnect: boolean = false;
@@ -171,12 +180,13 @@ export class TcpTransport extends EventEmitter implements Transport {
       const lengthBuffer = Buffer.alloc(4);
       lengthBuffer.writeUInt32LE(data.length, 0);
 
-      await this.acquireLock();
+      const unlock = await this.mutex.lock();
+
       try {
         await this.writeAll(lengthBuffer);
         await this.writeAll(data);
       } finally {
-        this.releaseLock();
+        unlock();
       }
     } catch (ex) {
       console.log(ex)
@@ -187,17 +197,6 @@ export class TcpTransport extends EventEmitter implements Transport {
     return new Promise((resolve, reject) => {
       this.socket.write(buffer, (err) => (err ? reject(err) : resolve()));
     });
-  }
-
-  private async acquireLock(): Promise<void> {
-    await this.writeLock;
-    this.writeLock = new Promise<void>((resolve) => {
-      this._releaseLock = resolve;
-    });
-  }
-
-  private releaseLock(): void {
-    this._releaseLock();
   }
 
   public async *receiveAsync(): AsyncIterable<Message> {
