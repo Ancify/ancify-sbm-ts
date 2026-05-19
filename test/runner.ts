@@ -69,6 +69,29 @@ export async function runAll(): Promise<void> {
     }
     process.exit(1);
   }
+
+  if (process.env.SBM_TEST_DUMP_HANDLES === "1") {
+    const proc = process as unknown as {
+      _getActiveHandles?: () => unknown[];
+      _getActiveRequests?: () => unknown[];
+    };
+    const handles = proc._getActiveHandles?.() ?? [];
+    const requests = proc._getActiveRequests?.() ?? [];
+    console.log("");
+    console.log(`active handles: ${handles.length}, active requests: ${requests.length}`);
+    const { Server, Socket } = require("net") as typeof import("net");
+    for (const h of handles) {
+      const obj = h as any;
+      const ctor = obj?.constructor?.name ?? typeof h;
+      const extra =
+        h instanceof Server ? ` listening=${(h as any).listening} addr=${JSON.stringify((h as any).address?.())}` :
+        h instanceof Socket ? ` destroyed=${(h as any).destroyed} readable=${(h as any).readable} writable=${(h as any).writable}` :
+        "";
+      console.log(`  handle: ${ctor}${extra}`);
+    }
+  }
+
+  process.exit(0);
 }
 
 function formatError(err: unknown): string {

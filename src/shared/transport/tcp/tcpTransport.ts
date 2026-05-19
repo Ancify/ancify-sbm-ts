@@ -339,6 +339,10 @@ export class TcpTransport extends EventEmitter implements Transport {
         if (this.sslConfig.sslEnabled) {
           this.detachReadListeners();
           this.detachLifecycleListeners();
+          // The plain connect above established a real TCP connection
+          // that we don't reuse — tls.connect() opens its own internal
+          // socket. Destroy the orphan instead of leaving it open.
+          try { this.socket.destroy(); } catch { /* ignore */ }
           this.socket = tls.connect({
             host: this.host,
             port: this.port,
@@ -587,13 +591,26 @@ export class TcpTransport extends EventEmitter implements Transport {
     this.detachLifecycleListeners();
     this.socket.end();
     this.socket.destroy();
-    // On the server-accept path, this.socket may be a TLSSocket wrapping
-    // the original raw TCP socket. Destroying the wrapper does not always
-    // synchronously close the underlying socket (net.Server's close()
-    // callback then hangs because it thinks the connection is still open).
-    // Force-destroy the raw socket too if it's different from this.socket.
-    if (this.rawAcceptSocket && this.rawAcceptSocket !== this.socket) {
-      try { this.rawAcceptSocket.destroy(); } catch { /* ignore */ }
+    // unref so the libuv handle never keeps the event loop alive
+    // post-dispose — TLS close-notify and FIN/ACK tear-down can take a
+    // few ticks during which destroyed === false; without unref a
+    // disposed transport would still pin the loop.
+    try { this.socket.unref(); } catch { /* ignore */ }
+    // When this.socket is a TLSSocket — either server-accept (captured
+    // explicitly into rawAcceptSocket before the wrap) or client tls.connect
+    // (the TLSSocket creates its own internal raw socket reachable via
+    // _parent) — destroying the wrapper does not always synchronously close
+    // the underlying raw TCP socket. Without this, the libuv handle keeps
+    // the event loop alive past dispose and net.Server.close()'s callback
+    // never fires. Force-destroy and unref any underlying raw socket we can
+    // find that isn't this.socket itself.
+    const tlsParent = (this.socket as { _parent?: Socket })._parent;
+    const candidates = [this.rawAcceptSocket, tlsParent].filter(
+      (s): s is Socket => !!s && s !== this.socket,
+    );
+    for (const raw of candidates) {
+      try { raw.destroy(); } catch { /* ignore */ }
+      try { raw.unref(); } catch { /* ignore */ }
     }
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
   }
