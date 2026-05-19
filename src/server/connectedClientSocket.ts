@@ -52,7 +52,11 @@ export class ConnectedClientSocket extends SbmSocket {
   }
 
   protected async isMessageAllowedAsync(message: Message): Promise<boolean> {
-    return this.disallowAnonymous && !this.isAuthenticated()
+    // Always allow _auth_ through the anonymous gate, otherwise a server
+    // with disallowAnonymous() set would refuse the very message clients
+    // need to authenticate with — locking everyone out permanently.
+    // C# parity: same exception in Server/ConnectedClientSocket.cs.
+    return this.disallowAnonymous && !this.isAuthenticated() && message.channel !== "_auth_"
       ? false
       : super.isMessageAllowedAsync(message);
   }
