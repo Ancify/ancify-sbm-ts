@@ -19,6 +19,11 @@ export class ServerSocket extends EventEmitter {
   private sslConfig: any; // Adjust type if needed
   private useWebSocket: boolean;
   private anonymousDisallowed: boolean = false;
+  private healthCheckTimer: NodeJS.Timeout | null = null;
+  private stopped: boolean = false;
+  // Server-driven liveness probe interval. Override before startAsync()
+  // for tests (small value) or noisy environments.
+  public healthCheckIntervalMs: number = 5000;
 
   constructor(host: string, port: number, sslConfig: any, useWebSocket: boolean = false, authHandler?: AuthHandler) {
     super();
@@ -35,23 +40,104 @@ export class ServerSocket extends EventEmitter {
     if (this.useWebSocket) {
       await this.startWebSocketServer();
     } else {
-      this.startTcpServer();
+      await this.startTcpServer();
+    }
+    this.scheduleNextHealthCheck();
+  }
+
+  public async stopAsync(): Promise<void> {
+    this.stopped = true;
+    if (this.healthCheckTimer) {
+      clearTimeout(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+    // Dispose connected clients first so their sockets close. Otherwise
+    // server.close()'s completion callback waits forever on still-open
+    // peer connections.
+    for (const client of [...this.clients.values()]) {
+      try { client.dispose(); } catch { /* ignore */ }
+    }
+    this.clients.clear();
+    if (this.server) {
+      const srv = this.server;
+      this.server = undefined;
+      // closeAllConnections (Node 18.2+) force-closes lingering peer
+      // sockets. For TLS-wrapped connections net.Server's internal
+      // connection counter can stay non-zero even after dispose()
+      // destroys both the TLSSocket wrapper and the raw underlying
+      // socket — close() then never fires its callback. We cap the
+      // wait at 1s and unref the listener so a stuck count cannot
+      // hang the event loop.
+      const closeAll = (srv as { closeAllConnections?: () => void }).closeAllConnections;
+      if (typeof closeAll === "function") closeAll.call(srv);
+      srv.unref();
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 1000);
+        srv.close(() => { clearTimeout(t); resolve(); });
+      });
     }
   }
 
-  private startTcpServer(): void {
+  private scheduleNextHealthCheck(): void {
+    if (this.stopped) return;
+    this.healthCheckTimer = setTimeout(() => {
+      this.runHealthCheck().catch((err) => console.error("Health check loop error:", err));
+    }, this.healthCheckIntervalMs);
+    // Don't keep the event loop alive on this timer alone; tests
+    // shouldn't have to call stopAsync just to exit.
+    if (typeof (this.healthCheckTimer as any).unref === "function") {
+      (this.healthCheckTimer as any).unref();
+    }
+  }
+
+  private async runHealthCheck(): Promise<void> {
+    for (const client of this.clients.values()) {
+      try {
+        await client.checkConnectionStatus();
+      } catch {
+        // Per-client errors are logged inside checkConnectionStatus.
+      }
+    }
+    this.scheduleNextHealthCheck();
+  }
+
+  private startTcpServer(): Promise<void> {
     this.server = createServer((socket: Socket) => {
       const transport = new TcpTransport(socket, this.sslConfig);
-      this.handleNewClient(transport);
-    });
-
-    this.server.listen(this.port, this.host, () => {
-      console.log(`TCP Server listening on ${this.host}:${this.port}`);
+      // C# parity: ServerSocket.StartAsync awaits SetupServerStream before
+      // constructing ConnectedClientSocket so the receive loop sees a
+      // ready (and, if configured, TLS-handshaken) stream. We do the
+      // same here. Errors during setup are logged and the half-open
+      // transport is closed; the client is not registered.
+      this.acceptTcpClient(transport).catch((err) => {
+        console.error("Failed to accept new client:", err);
+        try { transport.close(); } catch { /* ignore */ }
+      });
     });
 
     this.server.on("error", (err) => {
       console.error("Server error:", err);
     });
+
+    return new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        this.server?.removeListener("listening", onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        this.server?.removeListener("error", onError);
+        console.log(`TCP Server listening on ${this.host}:${this.port}`);
+        resolve();
+      };
+      this.server!.once("error", onError);
+      this.server!.once("listening", onListening);
+      this.server!.listen(this.port, this.host);
+    });
+  }
+
+  private async acceptTcpClient(transport: TcpTransport): Promise<void> {
+    await transport.setupServerStream();
+    this.handleNewClient(transport);
   }
 
   private async startWebSocketServer(): Promise<void> {
@@ -97,15 +183,4 @@ export class ServerSocket extends EventEmitter {
     this.anonymousDisallowed = true;
   }
 
-  public async checkConnectionStatus(): Promise<void> {
-    for (const client of this.clients.values()) {
-      try {
-        await client.checkConnectionStatus();
-      } catch {
-        // Ignore errors from individual clients
-      }
-    }
-
-    setTimeout(() => this.checkConnectionStatus(), 5000);
-  }
 }

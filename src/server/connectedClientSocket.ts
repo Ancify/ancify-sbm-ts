@@ -21,13 +21,17 @@ export class ConnectedClientSocket extends SbmSocket {
   }
 
   private setupAuthHandlers(): void {
-    this.on("_auth_", async (message: Message) => {
+    this.onHandler("_auth_", async (message: Message) => {
       this.authStatus = AuthStatus.Authenticating;
 
       const data = message.asTypeless();
       const id: string = data["Id"];
       const key: string = data["Key"];
-      const scope: string = data["Scope"];
+      // Scope is optional: clients may omit it entirely (in which case
+      // msgpack-lite leaves the field absent or nil). Pass undefined to
+      // AuthHandler so handlers can match on `scope === undefined`.
+      const rawScope = data["Scope"];
+      const scope: string | undefined = rawScope == null ? undefined : String(rawScope);
 
       const authHandler = this.server.authHandler;
       if (authHandler) {
@@ -52,7 +56,11 @@ export class ConnectedClientSocket extends SbmSocket {
   }
 
   protected async isMessageAllowedAsync(message: Message): Promise<boolean> {
-    return this.disallowAnonymous && !this.isAuthenticated()
+    // Always allow _auth_ through the anonymous gate, otherwise a server
+    // with disallowAnonymous() set would refuse the very message clients
+    // need to authenticate with — locking everyone out permanently.
+    // C# parity: same exception in Server/ConnectedClientSocket.cs.
+    return this.disallowAnonymous && !this.isAuthenticated() && message.channel !== "_auth_"
       ? false
       : super.isMessageAllowedAsync(message);
   }

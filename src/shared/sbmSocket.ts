@@ -17,7 +17,7 @@ export enum AuthStatus {
  */
 export abstract class SbmSocket extends EventEmitter {
   protected _transport?: Transport;
-  protected _handlers: Map<string, Array<(message: Message) => Promise<Message | null>>> = new Map();
+  protected _handlers: Map<string, Array<(message: Message) => Promise<Message | void | null>>> = new Map();
   protected _eventHandlers: Map<string, Array<(data: any) => Promise<void>>> = new Map();
   protected abortController: AbortController = new AbortController();
   public authStatus: AuthStatus = AuthStatus.None;
@@ -94,7 +94,7 @@ export abstract class SbmSocket extends EventEmitter {
    * Registers an asynchronous handler that may return a response message.
    * Returns a function that, when called, unregisters the handler.
    */
-  public onHandler(channel: string, handler: (message: Message) => Promise<Message | null>): () => void {
+  public onHandler(channel: string, handler: (message: Message) => Promise<Message | void | null>): () => void {
     if (!this._handlers.has(channel)) {
       this._handlers.set(channel, []);
     }
@@ -141,7 +141,7 @@ export abstract class SbmSocket extends EventEmitter {
 
   public sendAsync(message: Message): Promise<void> {
     if (!this._transport) {
-      throw new Error("Transport is not initialized.");
+      return Promise.resolve();
     }
     message.senderId = this.clientId;
     return this._transport.sendAsync(message);
@@ -154,21 +154,33 @@ export abstract class SbmSocket extends EventEmitter {
     request.senderId = this.clientId;
     return new Promise<Message>((resolve, reject) => {
       const replyChannel = `${request.channel}_reply_${request.messageId}`;
+      let settled = false;
+
       const unregister = this.onHandler(replyChannel, async (message: Message) => {
-        if (message.replyTo === request.messageId) {
-          clearTimeout(timer); // Clear the timer on success
-          resolve(message);
-          unregister();
+        if (settled || message.replyTo !== request.messageId) {
+          return null;
         }
+        settled = true;
+        clearTimeout(timer);
+        unregister();
+        resolve(message);
         return null;
       });
 
-      this.sendAsync(request).catch(reject);
-
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         unregister();
-        reject(new Error("Request timed out."));
+        reject(new Error(`Request ${request.channel} timed out.`));
       }, timeout);
+
+      this.sendAsync(request).catch((err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unregister();
+        reject(err);
+      });
     });
   }
 
@@ -195,10 +207,15 @@ export abstract class SbmSocket extends EventEmitter {
     }
   }
 
+  protected disposed: boolean = false;
   public dispose() {
+    // Re-entrancy guard. TcpTransport.dispose() emits a final
+    // ConnectionStatus.Disconnected, which ConnectedClientSocket maps
+    // back to this.dispose() — without the guard those two would call
+    // each other until the stack overflows.
+    if (this.disposed) return;
+    this.disposed = true;
     this.abortController.abort();
-    if (this._transport && typeof (this._transport as any).dispose === "function") {
-      (this._transport as any).dispose();
-    }
+    this._transport?.close();
   }
 }
