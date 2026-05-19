@@ -51,14 +51,18 @@ export class ServerSocket extends EventEmitter {
       clearTimeout(this.healthCheckTimer);
       this.healthCheckTimer = null;
     }
-    if (this.server) {
-      await new Promise<void>((resolve) => this.server!.close(() => resolve()));
-      this.server = undefined;
-    }
-    for (const client of this.clients.values()) {
+    // Dispose connected clients first so their sockets close. Otherwise
+    // server.close()'s completion callback waits forever on still-open
+    // peer connections.
+    for (const client of [...this.clients.values()]) {
       try { client.dispose(); } catch { /* ignore */ }
     }
     this.clients.clear();
+    if (this.server) {
+      const srv = this.server;
+      this.server = undefined;
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
   }
 
   private scheduleNextHealthCheck(): void {
