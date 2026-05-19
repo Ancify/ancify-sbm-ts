@@ -15,6 +15,7 @@ import "./comprehensive/concurrency-stress.test";
 import "./comprehensive/auth-scenarios.test";
 import "./comprehensive/memory-hygiene.test";
 import "./comprehensive/public-api.test";
+import "./comprehensive/tls.test";
 
 import { runAll } from "./runner";
 
