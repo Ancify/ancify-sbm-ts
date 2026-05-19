@@ -35,23 +35,47 @@ export class ServerSocket extends EventEmitter {
     if (this.useWebSocket) {
       await this.startWebSocketServer();
     } else {
-      this.startTcpServer();
+      await this.startTcpServer();
     }
   }
 
-  private startTcpServer(): void {
+  private startTcpServer(): Promise<void> {
     this.server = createServer((socket: Socket) => {
       const transport = new TcpTransport(socket, this.sslConfig);
-      this.handleNewClient(transport);
-    });
-
-    this.server.listen(this.port, this.host, () => {
-      console.log(`TCP Server listening on ${this.host}:${this.port}`);
+      // C# parity: ServerSocket.StartAsync awaits SetupServerStream before
+      // constructing ConnectedClientSocket so the receive loop sees a
+      // ready (and, if configured, TLS-handshaken) stream. We do the
+      // same here. Errors during setup are logged and the half-open
+      // transport is closed; the client is not registered.
+      this.acceptTcpClient(transport).catch((err) => {
+        console.error("Failed to accept new client:", err);
+        try { transport.close(); } catch { /* ignore */ }
+      });
     });
 
     this.server.on("error", (err) => {
       console.error("Server error:", err);
     });
+
+    return new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        this.server?.removeListener("listening", onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        this.server?.removeListener("error", onError);
+        console.log(`TCP Server listening on ${this.host}:${this.port}`);
+        resolve();
+      };
+      this.server!.once("error", onError);
+      this.server!.once("listening", onListening);
+      this.server!.listen(this.port, this.host);
+    });
+  }
+
+  private async acceptTcpClient(transport: TcpTransport): Promise<void> {
+    await transport.setupServerStream();
+    this.handleNewClient(transport);
   }
 
   private async startWebSocketServer(): Promise<void> {
