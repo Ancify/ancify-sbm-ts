@@ -167,7 +167,6 @@ export class TcpTransport extends EventEmitter implements Transport {
 
   public async sendAsync(message: Message): Promise<void> {
     try {
-      message.senderId = '00000000-0000-0000-0000-000000000000'
       const data = encode([
         message.channel,
         message.data,
