@@ -19,7 +19,13 @@ export class ClientSocket extends SbmSocket {
   }
 
   public async authenticateAsync(id: string, key: string, scope?: string): Promise<boolean> {
-    const message = new Message("_auth_", { Id: id, Key: key, Scope: scope });
+    // Omit Scope when not provided so msgpack-lite doesn't encode it as
+    // nil; the C# server treats a missing field as `null` and downstream
+    // AuthHandlers can match `scope === undefined` instead of getting a
+    // truthy-but-empty payload entry.
+    const payload: { Id: string; Key: string; Scope?: string } = { Id: id, Key: key };
+    if (scope !== undefined) payload.Scope = scope;
+    const message = new Message("_auth_", payload);
     const response = await this.sendRequestAsync(message);
     const data = response.asTypeless();
     const success = Boolean(data["Success"]);

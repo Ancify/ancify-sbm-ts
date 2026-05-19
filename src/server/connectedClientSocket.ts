@@ -27,7 +27,11 @@ export class ConnectedClientSocket extends SbmSocket {
       const data = message.asTypeless();
       const id: string = data["Id"];
       const key: string = data["Key"];
-      const scope: string = data["Scope"];
+      // Scope is optional: clients may omit it entirely (in which case
+      // msgpack-lite leaves the field absent or nil). Pass undefined to
+      // AuthHandler so handlers can match on `scope === undefined`.
+      const rawScope = data["Scope"];
+      const scope: string | undefined = rawScope == null ? undefined : String(rawScope);
 
       const authHandler = this.server.authHandler;
       if (authHandler) {
