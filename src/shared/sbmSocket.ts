@@ -209,8 +209,6 @@ export abstract class SbmSocket extends EventEmitter {
 
   public dispose() {
     this.abortController.abort();
-    if (this._transport && typeof (this._transport as any).dispose === "function") {
-      (this._transport as any).dispose();
-    }
+    this._transport?.close();
   }
 }
