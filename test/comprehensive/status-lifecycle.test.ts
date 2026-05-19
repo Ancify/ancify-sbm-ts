@@ -76,8 +76,6 @@ describe("ConnectionStatus lifecycle", () => {
   });
 
   test("failed status when connect cannot reach host", async () => {
-    // Bind a server briefly to claim a port, then release it so the
-    // client's connectAsync to that port fails reliably with ECONNREFUSED.
     const probe = new ServerSocket("127.0.0.1", 0, noSsl, false, async (id: string) =>
       AuthContext.success(id, []),
     );

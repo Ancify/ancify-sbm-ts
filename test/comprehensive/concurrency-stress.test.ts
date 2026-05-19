@@ -116,7 +116,6 @@ describe("concurrency and stress", () => {
       onServerClient: (client) => {
         client.onHandler("chunk", async () => {
           received++;
-          // Slow consumer simulation.
           await sleep(2);
           return null;
         });

@@ -48,9 +48,6 @@ describe("error paths", () => {
   });
 
   test("peer drops connection mid-handshake on the raw byte stream", async () => {
-    // Stand up a raw TCP server that closes the connection immediately
-    // after accepting. The SBM client should observe Failed/Disconnected
-    // instead of hanging waiting for bytes.
     const raw = createServer((sock: Socket) => sock.end());
     await new Promise<void>((resolve, reject) => {
       raw.once("listening", () => resolve());
@@ -71,7 +68,7 @@ describe("error paths", () => {
     }
   });
 
-  test("write-after-close: sendAsync on a disposed client surfaces error in logs but does not throw", async () => {
+  test("sendAsync on a disposed client does not throw", async () => {
     const h = await makeHarness();
     h.client.dispose();
     let threw = false;
@@ -80,9 +77,7 @@ describe("error paths", () => {
     } catch {
       threw = true;
     }
-    // sendAsync swallows internally (existing behavior — outside audit
-    // scope); confirm it does not bubble.
-    assert.equal(threw, false, "sendAsync must not bubble post-dispose errors");
+    assert.equal(threw, false);
     await h.server.stopAsync();
   });
 
@@ -112,8 +107,6 @@ describe("error paths", () => {
       await server.stopAsync();
       await waitFor(() => (transport as any).isConnected === false);
 
-      // Fire a request while we're between servers; it should reject by
-      // the deadline (200ms) rather than hang forever.
       let rejected = false;
       const start = Date.now();
       try {
@@ -144,8 +137,6 @@ describe("error paths", () => {
       },
     });
     try {
-      // boom triggers an exception inside the server-side handler. The
-      // receive loop must remain alive so 'after' is still dispatched.
       await h.client.sendAsync(new Message("boom"));
       const reply = await h.client.sendRequestAsync(new Message("after"), 2000);
       assert.equal(reply.data.ok, true);

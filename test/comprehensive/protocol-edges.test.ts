@@ -53,9 +53,8 @@ describe("protocol edge cases", () => {
   });
 
   test("near-MAX_FRAME_BYTES payload (~15 MiB) sends and receives intact", async () => {
-    // Use a buffer of bytes to bypass JS string-cost — msgpack-lite
-    // encodes Buffer as msgpack bin type (1 byte overhead per chunk).
-    // Sized so encoded frame stays under 16 MiB.
+    // 15 MiB raw bytes encodes well under the 16 MiB cap (1B msgpack
+    // bin-type overhead vs the per-character cost of a long string).
     const size = 15 * 1024 * 1024;
     const buf = Buffer.alloc(size, 0xab);
     let receivedLen = -1;

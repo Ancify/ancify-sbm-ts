@@ -61,8 +61,6 @@ describe("auth scenarios", () => {
       },
     });
     try {
-      // The request will time out because the server rejects the inbound
-      // message at isMessageAllowedAsync.
       let timedOut = false;
       try {
         await h.client.sendRequestAsync(new Message("hi"), 200);
