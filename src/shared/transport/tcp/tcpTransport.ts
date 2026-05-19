@@ -309,6 +309,19 @@ export class TcpTransport extends EventEmitter implements Transport {
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
+        if (attempt > 0) {
+          // A Node Socket whose connect attempt errored cannot be reused;
+          // it stays in an error state. Replace it on every retry past
+          // the first so the next awaitSocketEvent operates on a fresh
+          // socket. (Same applies to the initial isReconnect=true branch
+          // above, which already replaced once.)
+          this.detachReadListeners();
+          this.detachLifecycleListeners();
+          this.socket.destroy();
+          this.socket = new Socket();
+          this.buffer = Buffer.alloc(0);
+          this.attachReadListeners();
+        }
         await this.awaitSocketEvent(this.socket, "connect", () => {
           this.socket.connect(this.port, this.host);
         });
