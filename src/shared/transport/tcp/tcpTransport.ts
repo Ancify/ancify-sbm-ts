@@ -87,7 +87,14 @@ export class TcpTransport extends EventEmitter implements Transport {
       this.isServer = true;
     }
     this.attachReadListeners();
-    this.handleSocketErrors();
+    if (this.isServer) {
+      // Server-accepted socket is already connected. Wire lifecycle
+      // listeners immediately so error/close/end propagate to consumers.
+      // Client-side sockets defer this until connectAsync resolves, so
+      // a connect-time failure goes only to the in-scope reject() rather
+      // than fanning out to Disconnected + reconnect().
+      this.handleSocketErrors();
+    }
   }
 
   private attachReadListeners(): void {
@@ -153,6 +160,30 @@ export class TcpTransport extends EventEmitter implements Transport {
     const w = this.readWaiter;
     this.readWaiter = null;
     w.reject(err);
+  }
+
+  // One-shot wait for a socket event with paired error handling. Both
+  // listeners are removed on either outcome so a failed connect doesn't
+  // leak listeners onto a long-lived socket, and a late error after a
+  // successful connect doesn't end up rejecting a dead promise.
+  private awaitSocketEvent(
+    sock: Socket | tls.TLSSocket,
+    successEvent: "connect" | "secureConnect",
+    trigger?: () => void,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const onSuccess = () => {
+        sock.removeListener("error", onError);
+        resolve();
+      };
+      const onError = (err: Error) => {
+        sock.removeListener(successEvent, onSuccess);
+        reject(err);
+      };
+      sock.once(successEvent, onSuccess);
+      sock.once("error", onError);
+      if (trigger) trigger();
+    });
   }
 
   private waitForReadEvent(): Promise<void> {
@@ -232,6 +263,10 @@ export class TcpTransport extends EventEmitter implements Transport {
         throw new Error("SSL enabled but no certificate/key provided.");
       }
 
+      // Server-side TLS wrap: detach lifecycle listeners from the raw TCP
+      // socket since we're about to replace it. Read listeners are
+      // detached implicitly by attachReadListeners() after the wrap.
+      this.detachLifecycleListeners();
       this.socket = new tls.TLSSocket(this.socket, {
         isServer: true,
         key: this.sslConfig.key,
@@ -239,15 +274,12 @@ export class TcpTransport extends EventEmitter implements Transport {
         rejectUnauthorized: this.sslConfig.rejectUnauthorized,
       });
 
-      await new Promise<void>((resolve, reject) => {
-        (this.socket as tls.TLSSocket).once("secureConnect", resolve);
-        (this.socket as tls.TLSSocket).once("error", reject);
-      });
+      await this.awaitSocketEvent(this.socket as tls.TLSSocket, "secureConnect");
 
       this.isSettingUpSsl = false;
-      // TLS wrap replaced this.socket; reattach read listeners to the new
-      // socket and discard any buffered bytes from the raw TCP read path
-      // (handshake bytes already consumed by TLSSocket).
+      // TLS wrap replaced this.socket; reattach read + lifecycle listeners
+      // to the new socket. Buffered bytes from the raw TCP read path were
+      // already consumed by TLSSocket during the handshake.
       this.buffer = Buffer.alloc(0);
       this.attachReadListeners();
       this.handleSocketErrors();
@@ -270,45 +302,37 @@ export class TcpTransport extends EventEmitter implements Transport {
       this.socket = new Socket();
       this.buffer = Buffer.alloc(0);
       this.attachReadListeners();
-      this.handleSocketErrors();
+      // Lifecycle listeners are wired below, once connect succeeds.
     }
 
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(isReconnect ? ConnectionStatus.Reconnecting : ConnectionStatus.Connecting));
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        await new Promise<void>((resolve, reject) => {
-          this.socket.connect(this.port, this.host, resolve);
-          this.socket.once("error", reject);
+        await this.awaitSocketEvent(this.socket, "connect", () => {
+          this.socket.connect(this.port, this.host);
         });
 
         if (this.sslConfig.sslEnabled) {
           this.detachReadListeners();
           this.detachLifecycleListeners();
-          this.socket = tls.connect(
-            {
-              host: this.host,
-              port: this.port,
-              rejectUnauthorized: this.sslConfig.rejectUnauthorized,
-            },
-            () => (this.isSettingUpSsl = false)
-          );
-
-          await new Promise<void>((resolve, reject) => {
-            (this.socket as tls.TLSSocket).once("secureConnect", resolve);
-            (this.socket as tls.TLSSocket).once("error", reject);
+          this.socket = tls.connect({
+            host: this.host,
+            port: this.port,
+            rejectUnauthorized: this.sslConfig.rejectUnauthorized,
           });
+          this.isSettingUpSsl = true;
+
+          await this.awaitSocketEvent(this.socket as tls.TLSSocket, "secureConnect");
+          this.isSettingUpSsl = false;
+
           this.buffer = Buffer.alloc(0);
           this.attachReadListeners();
-          this.handleSocketErrors();
-        } else {
-          // Plain TCP socket; the constructor's listeners are still attached
-          // to this.socket. attachReadListeners/handleSocketErrors are
-          // idempotent on the same socket — call them to guarantee state
-          // after the isReconnect branch above replaced the socket.
-          this.attachReadListeners();
-          this.handleSocketErrors();
         }
+
+        // Connect succeeded; wire lifecycle listeners on the (possibly
+        // TLS-upgraded) socket.
+        this.handleSocketErrors();
 
         this.isConnected = true;
 
