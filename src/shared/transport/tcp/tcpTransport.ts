@@ -80,6 +80,7 @@ export class TcpTransport extends EventEmitter implements Transport {
       this.isServer = true;
     }
     this.attachReadListeners();
+    this.handleSocketErrors();
   }
 
   private attachReadListeners(): void {
@@ -159,27 +160,62 @@ export class TcpTransport extends EventEmitter implements Transport {
     return promise;
   }
 
+  // High-level lifecycle listeners (emits Disconnected, triggers reconnect).
+  // Tracked per-socket so we can detach cleanly across socket replacement.
+  private lifecycleListenersSocket: Socket | tls.TLSSocket | null = null;
+  private onLifecycleErrorListener: ((err: Error) => void) | null = null;
+  private onLifecycleCloseListener: (() => void) | null = null;
+  private onLifecycleEndListener: (() => void) | null = null;
+  // Fires exactly once per socket disconnect, regardless of which of
+  // error/close/end arrives first.
+  private disconnectedSignaled: boolean = false;
+  // In-flight reconnect chain; concurrent callers share this promise so
+  // we don't start two ConnectAsync loops in parallel on the same instance.
+  private reconnectInFlight: Promise<void> | null = null;
+
   private handleSocketErrors(): void {
-    this.socket.on("error", (err) => {
-      console.error("Socket error:", err);
-      this.isConnected = false;
-      this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
-      if (this.alwaysReconnect) this.reconnect();
-    });
+    if (this.lifecycleListenersSocket === this.socket) return;
+    this.detachLifecycleListeners();
+    const sock = this.socket;
+    this.disconnectedSignaled = false;
 
-    this.socket.on("close", () => {
-      console.warn("Socket closed.");
+    const signalDisconnected = (reason: string, err?: Error) => {
+      if (this.disconnectedSignaled) return;
+      this.disconnectedSignaled = true;
+      if (err) console.error(`Socket ${reason}:`, err);
+      else console.warn(`Socket ${reason}.`);
       this.isConnected = false;
       this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
-      if (this.alwaysReconnect) this.reconnect();
-    });
+      if (this.alwaysReconnect && !this.disposed) {
+        // Fire-and-forget; reconnect() coalesces concurrent callers.
+        this.reconnect().catch((e) => console.error("Reconnect failed:", e));
+      }
+    };
 
-    this.socket.on("end", () => {
-      console.warn("Socket ended.");
-      this.isConnected = false;
-      this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
-      if (this.alwaysReconnect) this.reconnect();
-    });
+    const onError = (err: Error) => signalDisconnected("error", err);
+    const onClose = () => signalDisconnected("closed");
+    const onEnd = () => signalDisconnected("ended");
+
+    sock.on("error", onError);
+    sock.on("close", onClose);
+    sock.on("end", onEnd);
+
+    this.lifecycleListenersSocket = sock;
+    this.onLifecycleErrorListener = onError;
+    this.onLifecycleCloseListener = onClose;
+    this.onLifecycleEndListener = onEnd;
+  }
+
+  private detachLifecycleListeners(): void {
+    const sock = this.lifecycleListenersSocket;
+    if (!sock) return;
+    if (this.onLifecycleErrorListener) sock.removeListener("error", this.onLifecycleErrorListener);
+    if (this.onLifecycleCloseListener) sock.removeListener("close", this.onLifecycleCloseListener);
+    if (this.onLifecycleEndListener) sock.removeListener("end", this.onLifecycleEndListener);
+    this.lifecycleListenersSocket = null;
+    this.onLifecycleErrorListener = null;
+    this.onLifecycleCloseListener = null;
+    this.onLifecycleEndListener = null;
   }
 
   public async setupServerStream(): Promise<void> {
@@ -207,6 +243,7 @@ export class TcpTransport extends EventEmitter implements Transport {
       // (handshake bytes already consumed by TLSSocket).
       this.buffer = Buffer.alloc(0);
       this.attachReadListeners();
+      this.handleSocketErrors();
     }
 
     this.isConnected = true;
@@ -221,10 +258,12 @@ export class TcpTransport extends EventEmitter implements Transport {
     this.isConnected = false;
     if (isReconnect) {
       this.detachReadListeners();
+      this.detachLifecycleListeners();
       this.socket.destroy();
       this.socket = new Socket();
       this.buffer = Buffer.alloc(0);
       this.attachReadListeners();
+      this.handleSocketErrors();
     }
 
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(isReconnect ? ConnectionStatus.Reconnecting : ConnectionStatus.Connecting));
@@ -238,6 +277,7 @@ export class TcpTransport extends EventEmitter implements Transport {
 
         if (this.sslConfig.sslEnabled) {
           this.detachReadListeners();
+          this.detachLifecycleListeners();
           this.socket = tls.connect(
             {
               host: this.host,
@@ -253,11 +293,14 @@ export class TcpTransport extends EventEmitter implements Transport {
           });
           this.buffer = Buffer.alloc(0);
           this.attachReadListeners();
+          this.handleSocketErrors();
         } else {
           // Plain TCP socket; the constructor's listeners are still attached
-          // to this.socket. attachReadListeners is idempotent on the same
-          // socket, but call it to guarantee state after socket replacement.
+          // to this.socket. attachReadListeners/handleSocketErrors are
+          // idempotent on the same socket — call them to guarantee state
+          // after the isReconnect branch above replaced the socket.
           this.attachReadListeners();
+          this.handleSocketErrors();
         }
 
         this.isConnected = true;
@@ -431,11 +474,21 @@ export class TcpTransport extends EventEmitter implements Transport {
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Authenticated));
   }
 
-  public async reconnect(): Promise<void> {
-    console.log('attempting to reconnect')
-    if (this.alwaysReconnect) {
-      await this.connectAsync(Number.MAX_SAFE_INTEGER, 100, true);
-    }
+  public reconnect(): Promise<void> {
+    if (this.reconnectInFlight) return this.reconnectInFlight;
+    if (this.disposed || this.isServer) return Promise.resolve();
+    console.log("attempting to reconnect");
+    const p = (async () => {
+      try {
+        if (this.alwaysReconnect) {
+          await this.connectAsync(Number.MAX_SAFE_INTEGER, 100, true);
+        }
+      } finally {
+        this.reconnectInFlight = null;
+      }
+    })();
+    this.reconnectInFlight = p;
+    return p;
   }
 
   public dispose(): void {
@@ -444,6 +497,7 @@ export class TcpTransport extends EventEmitter implements Transport {
     this.readEnded = true;
     this.fireReadWaiterError(new Error("Transport disposed"));
     this.detachReadListeners();
+    this.detachLifecycleListeners();
     this.socket.end();
     this.socket.destroy();
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
