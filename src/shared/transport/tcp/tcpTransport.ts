@@ -308,6 +308,7 @@ export class TcpTransport extends EventEmitter implements Transport {
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(isReconnect ? ConnectionStatus.Reconnecting : ConnectionStatus.Connecting));
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
+      if (this.disposed) return;
       try {
         if (attempt > 0) {
           // A Node Socket whose connect attempt errored cannot be reused;
@@ -357,7 +358,9 @@ export class TcpTransport extends EventEmitter implements Transport {
           this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Failed));
           return;
         }
+        if (this.disposed) return;
         await new Promise((res) => setTimeout(res, Math.min(delayMilliseconds * Math.pow(2, attempt), this.maxConnectWaitTime)));
+        if (this.disposed) return;
       }
     }
   }
