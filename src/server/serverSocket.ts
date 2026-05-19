@@ -19,6 +19,11 @@ export class ServerSocket extends EventEmitter {
   private sslConfig: any; // Adjust type if needed
   private useWebSocket: boolean;
   private anonymousDisallowed: boolean = false;
+  private healthCheckTimer: NodeJS.Timeout | null = null;
+  private stopped: boolean = false;
+  // Server-driven liveness probe interval. Override before startAsync()
+  // for tests (small value) or noisy environments.
+  public healthCheckIntervalMs: number = 5000;
 
   constructor(host: string, port: number, sslConfig: any, useWebSocket: boolean = false, authHandler?: AuthHandler) {
     super();
@@ -37,6 +42,46 @@ export class ServerSocket extends EventEmitter {
     } else {
       await this.startTcpServer();
     }
+    this.scheduleNextHealthCheck();
+  }
+
+  public async stopAsync(): Promise<void> {
+    this.stopped = true;
+    if (this.healthCheckTimer) {
+      clearTimeout(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+    if (this.server) {
+      await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+      this.server = undefined;
+    }
+    for (const client of this.clients.values()) {
+      try { client.dispose(); } catch { /* ignore */ }
+    }
+    this.clients.clear();
+  }
+
+  private scheduleNextHealthCheck(): void {
+    if (this.stopped) return;
+    this.healthCheckTimer = setTimeout(() => {
+      this.runHealthCheck().catch((err) => console.error("Health check loop error:", err));
+    }, this.healthCheckIntervalMs);
+    // Don't keep the event loop alive on this timer alone; tests
+    // shouldn't have to call stopAsync just to exit.
+    if (typeof (this.healthCheckTimer as any).unref === "function") {
+      (this.healthCheckTimer as any).unref();
+    }
+  }
+
+  private async runHealthCheck(): Promise<void> {
+    for (const client of this.clients.values()) {
+      try {
+        await client.checkConnectionStatus();
+      } catch {
+        // Per-client errors are logged inside checkConnectionStatus.
+      }
+    }
+    this.scheduleNextHealthCheck();
   }
 
   private startTcpServer(): Promise<void> {
@@ -121,15 +166,4 @@ export class ServerSocket extends EventEmitter {
     this.anonymousDisallowed = true;
   }
 
-  public async checkConnectionStatus(): Promise<void> {
-    for (const client of this.clients.values()) {
-      try {
-        await client.checkConnectionStatus();
-      } catch {
-        // Ignore errors from individual clients
-      }
-    }
-
-    setTimeout(() => this.checkConnectionStatus(), 5000);
-  }
 }
