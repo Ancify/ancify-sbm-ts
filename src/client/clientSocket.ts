@@ -18,6 +18,19 @@ export class ClientSocket extends SbmSocket {
     await this._transport!.connectAsync();
   }
 
+  /**
+   * Authenticate with the server. On success, `authStatus` becomes
+   * `Authenticated` and the transport's `Authenticated` status event fires.
+   *
+   * Credentials are NOT retained: a subsequent `Reconnected` event leaves
+   * the socket authenticated at the transport level only — the SBM-level
+   * `authStatus` falls back to whatever the application left it at, and
+   * the server treats the new connection as anonymous until the client
+   * calls `authenticateAsync` again. Apps using `transport.alwaysReconnect`
+   * should subscribe to `connectionStatusChanged` and re-call
+   * `authenticateAsync` on `Reconnected`. This matches the C# library's
+   * behavior; the symmetry is intentional, not an oversight.
+   */
   public async authenticateAsync(id: string, key: string, scope?: string): Promise<boolean> {
     // Omit Scope when not provided so msgpack-lite doesn't encode it as
     // nil; the C# server treats a missing field as `null` and downstream

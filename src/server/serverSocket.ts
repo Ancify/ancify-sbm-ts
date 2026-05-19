@@ -61,7 +61,20 @@ export class ServerSocket extends EventEmitter {
     if (this.server) {
       const srv = this.server;
       this.server = undefined;
-      await new Promise<void>((resolve) => srv.close(() => resolve()));
+      // closeAllConnections (Node 18.2+) force-closes lingering peer
+      // sockets. For TLS-wrapped connections net.Server's internal
+      // connection counter can stay non-zero even after dispose()
+      // destroys both the TLSSocket wrapper and the raw underlying
+      // socket — close() then never fires its callback. We cap the
+      // wait at 1s and unref the listener so a stuck count cannot
+      // hang the event loop.
+      const closeAll = (srv as { closeAllConnections?: () => void }).closeAllConnections;
+      if (typeof closeAll === "function") closeAll.call(srv);
+      srv.unref();
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 1000);
+        srv.close(() => { clearTimeout(t); resolve(); });
+      });
     }
   }
 

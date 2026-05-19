@@ -39,6 +39,12 @@ export class Mutex {
 
 export class TcpTransport extends EventEmitter implements Transport {
   private socket: Socket | tls.TLSSocket;
+  // Server-side: the raw TCP socket from createServer() before any TLS
+  // wrap. We track it so dispose() can force-destroy it directly —
+  // destroying the TLSSocket wrapper alone does not synchronously close
+  // the underlying TCP socket that net.Server tracks for close-completion,
+  // which makes server.close() hang on TLS-wrapped connections.
+  private rawAcceptSocket: Socket | null = null;
   private host: string;
   private port: number;
   private sslConfig: SslConfig;
@@ -81,6 +87,7 @@ export class TcpTransport extends EventEmitter implements Transport {
       this.isServer = false;
     } else {
       this.socket = socketOrHost;
+      this.rawAcceptSocket = socketOrHost;
       this.host = socketOrHost.remoteAddress || "";
       this.port = socketOrHost.remotePort || 0;
       this.sslConfig = portOrSslConfig as SslConfig;
@@ -168,7 +175,7 @@ export class TcpTransport extends EventEmitter implements Transport {
   // successful connect doesn't end up rejecting a dead promise.
   private awaitSocketEvent(
     sock: Socket | tls.TLSSocket,
-    successEvent: "connect" | "secureConnect",
+    successEvent: "connect" | "secureConnect" | "secure",
     trigger?: () => void,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
@@ -274,7 +281,9 @@ export class TcpTransport extends EventEmitter implements Transport {
         rejectUnauthorized: this.sslConfig.rejectUnauthorized,
       });
 
-      await this.awaitSocketEvent(this.socket as tls.TLSSocket, "secureConnect");
+      // tls.TLSSocket with isServer:true signals handshake completion via
+      // 'secure', not 'secureConnect' (which is a tls.connect()-only event).
+      await this.awaitSocketEvent(this.socket as tls.TLSSocket, "secure");
 
       this.isSettingUpSsl = false;
       // TLS wrap replaced this.socket; reattach read + lifecycle listeners
@@ -541,6 +550,17 @@ export class TcpTransport extends EventEmitter implements Transport {
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Authenticated));
   }
 
+  /**
+   * Re-establish the underlying TCP (and optionally TLS) connection.
+   * Re-entrant: concurrent callers share a single in-flight reconnect
+   * chain, so each disconnect signal does not spawn a new attempt loop.
+   *
+   * This is a *transport-level* reconnect only. It does NOT re-run
+   * authentication; the application owns that. Subscribe to
+   * `connectionStatusChanged` for `Reconnected` and call
+   * `ClientSocket.authenticateAsync` again from there. This matches
+   * the C# library's behavior.
+   */
   public reconnect(): Promise<void> {
     if (this.reconnectInFlight) return this.reconnectInFlight;
     if (this.disposed || this.isServer) return Promise.resolve();
@@ -567,6 +587,14 @@ export class TcpTransport extends EventEmitter implements Transport {
     this.detachLifecycleListeners();
     this.socket.end();
     this.socket.destroy();
+    // On the server-accept path, this.socket may be a TLSSocket wrapping
+    // the original raw TCP socket. Destroying the wrapper does not always
+    // synchronously close the underlying socket (net.Server's close()
+    // callback then hangs because it thinks the connection is still open).
+    // Force-destroy the raw socket too if it's different from this.socket.
+    if (this.rawAcceptSocket && this.rawAcceptSocket !== this.socket) {
+      try { this.rawAcceptSocket.destroy(); } catch { /* ignore */ }
+    }
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
   }
 
