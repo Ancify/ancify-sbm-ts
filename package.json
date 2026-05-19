@@ -12,6 +12,7 @@
     "typescript": "^5.7.3"
   },
   "scripts": {
-    "start": "ts-node index.ts"
+    "start": "ts-node index.ts",
+    "test": "ts-node test/all.ts"
   }
 }
