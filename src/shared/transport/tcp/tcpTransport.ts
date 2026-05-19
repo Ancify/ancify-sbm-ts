@@ -20,6 +20,13 @@ function delay(ms: number) {
   return new Promise( resolve => setTimeout(resolve, ms) );
 }
 
+// Hard cap on the wire-supplied length-prefix. A malicious or corrupted
+// frame could otherwise allocate up to 4 GiB. Matches the C# side's
+// MaxFrameBytes for cross-implementation parity. Frames larger than this
+// abort the receive loop and trigger a reconnect (client) or socket close
+// (server) so we don't get stuck mid-stream on a poisoned frame.
+export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
 export class Mutex {
   private mutex = Promise.resolve();
 
@@ -329,6 +336,12 @@ export class TcpTransport extends EventEmitter implements Transport {
         message.targetId,
       ]);
 
+      if (data.length > MAX_FRAME_BYTES) {
+        throw new Error(
+          `Outgoing frame size ${data.length} exceeds MAX_FRAME_BYTES (${MAX_FRAME_BYTES}); refusing to send.`,
+        );
+      }
+
       const lengthBuffer = Buffer.alloc(4);
       lengthBuffer.writeUInt32LE(data.length, 0);
 
@@ -369,6 +382,20 @@ export class TcpTransport extends EventEmitter implements Transport {
       }
 
       const length = lengthPrefix.readUInt32LE(0);
+      if (length === 0 || length > MAX_FRAME_BYTES) {
+        console.error(
+          `Incoming frame size ${length} is invalid (max ${MAX_FRAME_BYTES}); dropping connection.`,
+        );
+        // Stream is poisoned — we can't sync to the next frame boundary
+        // without a real framing escape. Force a clean disconnect; the
+        // reconnect path will create a fresh socket with a fresh buffer.
+        this.socket.destroy(new Error(`Oversize/empty frame: ${length} bytes`));
+        if (this.alwaysReconnect && !this.isServer) {
+          await this.waitForReconnect(abortSignal);
+          continue;
+        }
+        return;
+      }
       const dataBuffer = await this.readExact(length, abortSignal);
       if (!dataBuffer) {
         if (this.disposed || abortSignal?.aborted) return;
