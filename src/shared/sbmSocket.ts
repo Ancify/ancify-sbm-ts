@@ -154,21 +154,33 @@ export abstract class SbmSocket extends EventEmitter {
     request.senderId = this.clientId;
     return new Promise<Message>((resolve, reject) => {
       const replyChannel = `${request.channel}_reply_${request.messageId}`;
+      let settled = false;
+
       const unregister = this.onHandler(replyChannel, async (message: Message) => {
-        if (message.replyTo === request.messageId) {
-          clearTimeout(timer); // Clear the timer on success
-          resolve(message);
-          unregister();
+        if (settled || message.replyTo !== request.messageId) {
+          return null;
         }
+        settled = true;
+        clearTimeout(timer);
+        unregister();
+        resolve(message);
         return null;
       });
 
-      this.sendAsync(request).catch(reject);
-
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         unregister();
         reject(new Error(`Request ${request.channel} timed out.`));
       }, timeout);
+
+      this.sendAsync(request).catch((err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unregister();
+        reject(err);
+      });
     });
   }
 
