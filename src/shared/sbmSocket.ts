@@ -207,7 +207,14 @@ export abstract class SbmSocket extends EventEmitter {
     }
   }
 
+  protected disposed: boolean = false;
   public dispose() {
+    // Re-entrancy guard. TcpTransport.dispose() emits a final
+    // ConnectionStatus.Disconnected, which ConnectedClientSocket maps
+    // back to this.dispose() — without the guard those two would call
+    // each other until the stack overflows.
+    if (this.disposed) return;
+    this.disposed = true;
     this.abortController.abort();
     this._transport?.close();
   }
