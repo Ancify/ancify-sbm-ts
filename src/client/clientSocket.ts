@@ -1,4 +1,4 @@
-import { SbmSocket } from "../shared/sbmSocket";
+import { SbmSocket, AuthStatus } from "../shared/sbmSocket";
 import { Transport } from "../interfaces/transport";
 import { Message } from "../shared/model/networking/message";
 import { ConnectionStatus, ConnectionStatusEventArgs } from "../shared/model/networking/connectionStatus";
@@ -25,11 +25,13 @@ export class ClientSocket extends SbmSocket {
     // truthy-but-empty payload entry.
     const payload: { Id: string; Key: string; Scope?: string } = { Id: id, Key: key };
     if (scope !== undefined) payload.Scope = scope;
+    this.authStatus = AuthStatus.Authenticating;
     const message = new Message("_auth_", payload);
     const response = await this.sendRequestAsync(message);
     const data = response.asTypeless();
     const success = Boolean(data["Success"]);
 
+    this.authStatus = success ? AuthStatus.Authenticated : AuthStatus.Failed;
     if (success) {
       this._transport?.onAuthenticated();
     }
