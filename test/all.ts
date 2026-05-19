@@ -7,6 +7,15 @@ import "./frame.test";
 import "./auth.test";
 import "./lifecycle.test";
 
+// Phase 4 comprehensive suite.
+import "./comprehensive/status-lifecycle.test";
+import "./comprehensive/error-paths.test";
+import "./comprehensive/protocol-edges.test";
+import "./comprehensive/concurrency-stress.test";
+import "./comprehensive/auth-scenarios.test";
+import "./comprehensive/memory-hygiene.test";
+import "./comprehensive/public-api.test";
+
 import { runAll } from "./runner";
 
 runAll();
