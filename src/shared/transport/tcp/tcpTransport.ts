@@ -69,18 +69,21 @@ export class TcpTransport extends EventEmitter implements Transport {
   private handleSocketErrors(): void {
     this.socket.on("error", (err) => {
       console.error("Socket error:", err);
+      this.isConnected = false;
       this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
       if (this.alwaysReconnect) this.reconnect();
     });
 
     this.socket.on("close", () => {
       console.warn("Socket closed.");
+      this.isConnected = false;
       this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
       if (this.alwaysReconnect) this.reconnect();
     });
 
     this.socket.on("end", () => {
       console.warn("Socket ended.");
+      this.isConnected = false;
       this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
       if (this.alwaysReconnect) this.reconnect();
     });
@@ -108,6 +111,7 @@ export class TcpTransport extends EventEmitter implements Transport {
       this.isSettingUpSsl = false;
     }
 
+    this.isConnected = true;
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Connected));
   }
 
@@ -294,6 +298,7 @@ export class TcpTransport extends EventEmitter implements Transport {
 
   public dispose(): void {
     this.disposed = true;
+    this.isConnected = false;
     this.socket.end();
     this.socket.destroy();
     this.emit("connectionStatusChanged", new ConnectionStatusEventArgs(ConnectionStatus.Disconnected));
