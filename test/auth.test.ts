@@ -54,12 +54,6 @@ test("M10 regression: auth without scope leaves scope as undefined on the server
 });
 
 test("auth failure: client sees Success=false when handler rejects, connection stays open", async () => {
-  // We use a failure context that keeps the connection alive
-  // (isConnectionAllowed=true) so the reply can travel back to the
-  // client cleanly. The close-and-reply ordering when
-  // isConnectionAllowed=false is a separate, pre-existing issue (the
-  // server closes the socket inside the handler and then attempts to
-  // write the reply on it) and is out of scope for this audit.
   const failHandler = async (): Promise<AuthContext> =>
     new AuthContext(undefined, [], undefined, undefined, /* success */ false, /* isConnectionAllowed */ true);
 
@@ -71,6 +65,29 @@ test("auth failure: client sees Success=false when handler rejects, connection s
     await client.connectAsync();
     const ok = await client.authenticateAsync("a", "b", "client");
     assert.equal(ok, false, "auth must report failure");
+    assert.equal(client.isAuthenticated(), false);
+  } finally {
+    client.dispose();
+    await server.stopAsync();
+  }
+});
+
+test("auth reject with isConnectionAllowed=false still delivers typed Success=false reply", async () => {
+  // SDK finding #2 regression: previously the server closed the transport
+  // before sending the Success=false reply, so the outer dispatcher hit
+  // a closed-socket write and the client saw a bare drop instead of a
+  // typed auth-rejected reply. The fix sends the reply first, then closes.
+  const rejectHandler = async (): Promise<AuthContext> =>
+    new AuthContext(undefined, [], undefined, undefined, /* success */ false, /* isConnectionAllowed */ false);
+
+  const server = new ServerSocket("127.0.0.1", 0, noSsl, false, rejectHandler);
+  await server.startAsync();
+  const port = ((server as any).server.address() as AddressInfo).port;
+  const client = new ClientSocket(new TcpTransport("127.0.0.1", port, noSsl));
+  try {
+    await client.connectAsync();
+    const ok = await client.authenticateAsync("a", "b", "client");
+    assert.equal(ok, false, "client must observe a typed Success=false, not a connection drop");
     assert.equal(client.isAuthenticated(), false);
   } finally {
     client.dispose();

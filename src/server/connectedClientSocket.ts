@@ -42,7 +42,24 @@ export class ConnectedClientSocket extends SbmSocket {
           this.authStatus = AuthStatus.Failed;
 
           if (!result.isConnectionAllowed) {
+            // Send the typed Success=false reply BEFORE closing.
+            // If we close first and return the reply, the outer
+            // SbmSocket.handleMessageAsync calls sendAsync on a
+            // closed transport and the client sees a bare drop
+            // instead of an auth-rejected reply.
+            // Mirrors the python port (sdk finding #2) and the C# fix.
+            const rejectReply = Message.fromReply(message, { Success: false });
+            rejectReply.replyTo = message.messageId;
+            rejectReply.targetId = message.senderId;
+            rejectReply.senderId = this.clientId;
+            try {
+              await this._transport?.sendAsync(rejectReply);
+            } catch (err) {
+              console.debug("Failed to send auth-reject reply before close:", err);
+            }
+
             this._transport?.close();
+            return;
           }
 
           return Message.fromReply(message, { Success: false });
