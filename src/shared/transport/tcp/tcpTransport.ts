@@ -1,4 +1,4 @@
-import { Socket } from "net";
+import { Socket, isIP } from "net";
 import * as tls from "tls";
 import { Transport } from "../../../interfaces/transport";
 import { Message } from "../../../shared/model/networking/message";
@@ -339,13 +339,10 @@ export class TcpTransport extends EventEmitter implements Transport {
         if (this.sslConfig.sslEnabled) {
           this.detachReadListeners();
           this.detachLifecycleListeners();
-          // The plain connect above established a real TCP connection
-          // that we don't reuse — tls.connect() opens its own internal
-          // socket. Destroy the orphan instead of leaving it open.
-          try { this.socket.destroy(); } catch { /* ignore */ }
+          // Upgrade the established TCP connection; do not abandon a TLS handshake.
           this.socket = tls.connect({
-            host: this.host,
-            port: this.port,
+            socket: this.socket,
+            servername: isIP(this.host) ? undefined : this.host,
             rejectUnauthorized: this.sslConfig.rejectUnauthorized,
           });
           this.isSettingUpSsl = true;
@@ -383,10 +380,11 @@ export class TcpTransport extends EventEmitter implements Transport {
       const data = encode([
         message.channel,
         message.data,
-        message.replyTo,
+        message.replyTo || null,
         message.messageId,
-        message.senderId,
-        message.targetId,
+        // C# GuidFormatter rejects an empty string before auth can run.
+        message.senderId || "00000000-0000-0000-0000-000000000000",
+        message.targetId || null,
       ]);
 
       if (data.length > MAX_FRAME_BYTES) {

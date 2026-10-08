@@ -23,6 +23,8 @@ describe("TLS round-trip (M6 regression)", () => {
       );
     });
     await server.startAsync();
+    let acceptedConnections = 0;
+    (server as any).server.on("connection", () => acceptedConnections++);
     const port = ((server as any).server.address() as AddressInfo).port;
 
     const transport = new TcpTransport("127.0.0.1", port, clientSsl);
@@ -32,6 +34,7 @@ describe("TLS round-trip (M6 regression)", () => {
       assert.equal(await client.authenticateAsync("a", "b", "client"), true);
       const reply = await client.sendRequestAsync(new Message("tls-ping", { pong: 42 }), 3000);
       assert.equal(reply.data.pong, 42);
+      assert.equal(acceptedConnections, 1, "TLS must use one TCP connection");
     } finally {
       client.dispose();
       await server.stopAsync();
